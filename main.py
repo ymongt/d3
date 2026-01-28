@@ -116,25 +116,40 @@ def enable_disable_test(uad):
 
 def bypass_test(uad):
     print("\n=== Filter Bypass Test ===")
-    uad.enable()
+    
+    # Ensure filter enabled initially
+    uad.enable()  # FEN=1, HALT=0
+
+    # Input sequence
+    inputs = [0x10, 0x20, 0x40, 0x80, 0x01, 0x02, 0x04, 0x08]
+
+    # --- Bypass ON: disable filter (FEN=0) ---
     csr = uad.read_CSR()
     if csr is not None:
-        uad.write_CSR(csr | (1 << 4))  # Activate BYPASS
-        print("Bypass mode activated")
-    inputs = [0x10, 0x20, 0x40, 0x80]
+        uad.write_CSR(csr & ~(1 << 0))  # FEN=0
+        print("Bypass mode activated (FEN=0)")
+
     print("\n-- Sending signals with Bypass ON --")
     for val in inputs:
         output = uad.drive_signal(val)
         print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
-    # Deactivate bypass
+
+    # --- Bypass OFF: enable filter (FEN=1) ---
     csr = uad.read_CSR()
     if csr is not None:
-        uad.write_CSR(csr & ~(1 << 4))
-        print("\nBypass mode deactivated")
+        uad.write_CSR((csr | (1 << 0)) & ~(1 << 5))  # FEN=1, HALT=0
+        print("\nBypass mode deactivated (FEN=1, HALT cleared)")
+
+    # Flush FIR pipeline
+    for _ in range(4):
+        uad.drive_signal(0x0)
+
     print("\n-- Sending signals with Bypass OFF --")
     for val in inputs:
         output = uad.drive_signal(val)
         print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
+
+
 
 def buffer_halt_test(uad):
     print("\n=== Task 4: Buffer/Halt/Overflow Test ===")
@@ -171,17 +186,7 @@ def buffer_halt_test(uad):
     print("Buffer count:", uad.buffer_count())
     print("Overflow after clear:", uad.has_overflowed())
 
-def signal_channel_run(uad):
-    print("\n=== Signal Channel Run Test ===")
-    uad.enable()
-    csr = uad.read_CSR()
-    if csr is not None:
-        uad.write_CSR(csr & ~(1 << 5))  # Clear HALT
-    input_values = [0x10, 0x20, 0x40, 0x80]
-    for val in input_values:
-        print(f"Sending input {hex(val)}")
-        output = uad.drive_signal(val)
-        print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
+
 
 # -------------------------------
 # Main loop over all instances
@@ -196,4 +201,4 @@ for impl in instances:
     enable_disable_test(uad)
     bypass_test(uad)
     buffer_halt_test(uad)
-    signal_channel_run(uad)
+    
