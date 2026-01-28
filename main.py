@@ -2,10 +2,12 @@ import os
 import subprocess
 import platform
 
+# -------------------------------
+# UAD class to interface with IP
+# -------------------------------
 class Uad():
     def __init__(self):
         self.inst = None
-        # Detect OS for command format
         self.is_windows = platform.system() == "Windows"
 
     # --- Common Channel ---
@@ -26,7 +28,7 @@ class Uad():
         cmd = f'{self.inst}.exe cfg --address 0x0' if self.is_windows else f'./{self.inst} cfg --address 0x0'
         try:
             csr_bytes = subprocess.check_output(cmd, shell=True)
-            return int(csr_bytes, 0)
+            return int(csr_bytes.strip(), 16)
         except subprocess.CalledProcessError:
             print("error: interface unavailable, cannot read CSR")
             return None
@@ -35,13 +37,17 @@ class Uad():
         cmd = f'{self.inst}.exe cfg --address {hex(address)}' if self.is_windows else f'./{self.inst} cfg --address {hex(address)}'
         try:
             output = subprocess.check_output(cmd, shell=True)
-            return int(output, 0)
+            return int(output.strip(), 16)
         except subprocess.CalledProcessError:
             print(f"error: interface unavailable, cannot read register {hex(address)}")
             return None
 
     def write_register(self, address, value):
         cmd = f'{self.inst}.exe cfg --address {hex(address)} --data {hex(value)}' if self.is_windows else f'./{self.inst} cfg --address {hex(address)} --data {hex(value)}'
+        return os.system(cmd)
+
+    def write_CSR(self, value):
+        cmd = f'{self.inst}.exe cfg --address 0x0 --data {hex(value)}' if self.is_windows else f'./{self.inst} cfg --address 0x0 --data {hex(value)}'
         return os.system(cmd)
 
     # --- CSR helpers ---
@@ -68,90 +74,126 @@ class Uad():
             csr |= (1 << 5)
             self.write_CSR(csr)
 
-    def write_CSR(self, value):
-        cmd = f'{self.inst}.exe cfg --address 0x0 --data {hex(value)}' if self.is_windows else f'./{self.inst} cfg --address 0x0 --data {hex(value)}'
-        return os.system(cmd)
-
     # --- Signal Channel ---
     def drive_signal(self, value):
         cmd = f'{self.inst}.exe sig --data {hex(value)}' if self.is_windows else f'./{self.inst} sig --data {hex(value)}'
         try:
-            output_bytes = subprocess.check_output(cmd, shell=True)
-            if output_bytes.strip() == b'':
-                print(f"Warning: No output returned for input {hex(value)}")
+            output = subprocess.check_output(cmd, shell=True)
+            output = output.strip()
+            if not output:
+                # No output returned
                 return None
-            return int(output_bytes, 0)
+            return int(output, 16)
         except subprocess.CalledProcessError:
             print(f"error: interface unavailable, cannot drive signal {hex(value)}")
             return None
+        except ValueError:
+            print(f"error: invalid output from signal command: {output}")
+            return None
 
 # -------------------------------
-# Test code
+# Test functions
 # -------------------------------
+def enable_disable_test(uad):
+    print("=== Enable/Disable Test ===")
+    uad.reset()
+    uad.enable()
+    csr = uad.read_CSR()
+    if csr is not None:
+        print(f"CSR after enable: 0x{csr:08X}")
+        print("Filter enabled:", (csr >> 0) & 1)
+    else:
+        print("CSR after enable: Interface unavailable")
+        print("Filter enabled: Interface unavailable")
+    uad.disable()
+    csr = uad.read_CSR()
+    if csr is not None:
+        print(f"CSR after disable: 0x{csr:08X}")
+        print("Filter enabled:", (csr >> 0) & 1)
+    else:
+        print("CSR after disable: Interface unavailable")
+        print("Filter enabled: Interface unavailable")
 
-test0 = Uad()
-test0.inst = "impl0"
+def bypass_test(uad):
+    print("\n=== Filter Bypass Test ===")
+    uad.enable()
+    csr = uad.read_CSR()
+    if csr is not None:
+        uad.write_CSR(csr | (1 << 4))  # Activate BYPASS
+        print("Bypass mode activated")
+    inputs = [0x10, 0x20, 0x40, 0x80]
+    print("\n-- Sending signals with Bypass ON --")
+    for val in inputs:
+        output = uad.drive_signal(val)
+        print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
+    # Deactivate bypass
+    csr = uad.read_CSR()
+    if csr is not None:
+        uad.write_CSR(csr & ~(1 << 4))
+        print("\nBypass mode deactivated")
+    print("\n-- Sending signals with Bypass OFF --")
+    for val in inputs:
+        output = uad.drive_signal(val)
+        print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
 
-# --- Task 1: Enable / Disable Test ---
-print("=== Enable/Disable Test ===")
-test0.reset()
-test0.enable()
-enabled = test0.read_register(0x0)
-print("Filter enabled:", enabled >> 0 & 1 if enabled is not None else "Cannot read CSR")
+def buffer_halt_test(uad):
+    print("\n=== Task 4: Buffer/Halt/Overflow Test ===")
+    uad.halt()
+    print("Filter halted:", uad.is_halted())
+    # Clear buffer
+    uad.write_CSR(uad.read_CSR() | (1 << 17))  # IBCLR
+    print("Buffer cleared → Buffer count:", uad.buffer_count())
+    print("Overflow after clear:", uad.has_overflowed())
+    # Send some inputs
+    inputs = [0x10, 0x20, 0x30, 0x40]
+    for i, val in enumerate(inputs):
+        uad.drive_signal(val)
+        count = uad.buffer_count()
+        print(f"Input {i+1} ({hex(val)}) sent → Buffer count: {count}")
+        if uad.has_overflowed():
+            print("Unexpected overflow detected!")
+    # Overflow test
+    print("\n-- Testing buffer overflow safely --")
+    for i in range(260):
+        uad.drive_signal(0x10)
+        count = uad.buffer_count()
+        if i % 50 == 0 or count >= 255:
+            print(f"Input {i+1} sent → Buffer count: {count}")
+        if count >= 255:
+            if uad.has_overflowed():
+                print("Overflow detected correctly!")
+            else:
+                print("Warning: Buffer full but overflow bit not set!")
+            break
+    # Clear buffer after test
+    uad.write_CSR(uad.read_CSR() | (1 << 17))
+    print("\nAfter clearing buffer:")
+    print("Buffer count:", uad.buffer_count())
+    print("Overflow after clear:", uad.has_overflowed())
 
-test0.disable()
-enabled = test0.read_register(0x0)
-print("Filter disabled:", enabled >> 0 & 1 if enabled is not None else "Interface unavailable, cannot read CSR")
+def signal_channel_run(uad):
+    print("\n=== Signal Channel Run Test ===")
+    uad.enable()
+    csr = uad.read_CSR()
+    if csr is not None:
+        uad.write_CSR(csr & ~(1 << 5))  # Clear HALT
+    input_values = [0x10, 0x20, 0x40, 0x80]
+    for val in input_values:
+        print(f"Sending input {hex(val)}")
+        output = uad.drive_signal(val)
+        print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
 
-# --- Task 2: Read/Write Register Test ---
-print("\n=== Read/Write Register Test ===")
-test0.enable()  # Re-enable to access registers safely
+# -------------------------------
+# Main loop over all instances
+# -------------------------------
+instances = ["impl0", "impl1", "impl2", "impl3", "impl4", "impl5"]
 
-# Read CSR (0x0)
-csr_value = test0.read_register(0x0)
-print("Initial CSR value:", hex(csr_value) if csr_value is not None else "Cannot read CSR")
-
-# Write a value to COEF register (0x4)
-new_coef = 0x12345678
-print(f"Writing {hex(new_coef)} to COEF register (0x4)")
-test0.write_register(0x4, new_coef)
-
-# Read it back
-read_back = test0.read_register(0x4)
-print("Read back COEF register:", hex(read_back) if read_back is not None else "Cannot read COEF")
-
-# --- Task 3: Signal Channel ---
-print("\n=== Signal Channel Test ===")
-test0.enable()  # Make sure filter is enabled
-# Optional: unhalt here if you implemented it
-
-inputs = [0x10, 0x20, 0x40, 0x80]
-for val in inputs:
-    output = test0.drive_signal(val)
-    print(f"Input {hex(val)} → Output {hex(output) if output is not None else 'Error'}")
-
-# --- Task 4 Buffer/Halt---
-print("\n=== Buffer Test ===")
-
-# Halt the filter so it starts storing inputs in the buffer
-test0.halt()
-print("Filter halted:", test0.is_halted())
-
-# Define some sample input signals
-inputs = [0x10, 0x20, 0x30, 0x40]
-
-# Send inputs one by one and print buffer count
-for i, val in enumerate(inputs):
-    print(f"Sending input {hex(val)}")
-    output = test0.drive_signal(val)  # this will store in buffer since filter is halted
-    count = test0.buffer_count()
-    print(f"Buffer count after input {i+1}: {count}")
-    if test0.has_overflowed():
-        print("Uh oh! Buffer overflowed!")
-
-# Clear the buffer
-print("Clearing buffer...")
-test0.write_CSR(test0.read_CSR() | (1 << 17))  # set IBCLR bit
-print("Buffer count after clear:", test0.buffer_count())
-print("Overflow after clear:", test0.has_overflowed())
-
+for impl in instances:
+    print(f"\n\n======= Testing {impl} =======\n")
+    uad = Uad()
+    uad.inst = impl
+    
+    enable_disable_test(uad)
+    bypass_test(uad)
+    buffer_halt_test(uad)
+    signal_channel_run(uad)
